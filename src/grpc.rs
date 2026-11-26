@@ -656,11 +656,17 @@ impl SlotCollector {
         let mut seen_transactions = HashSet::new();
 
         let mut last_logged_percent = 0;
+        let mut is_slot_stream_ended = false;
 
         // Collect until we have enough slots
         loop {
             tokio::select! {
-                Some(update) = slot_rx.recv() => {
+                update = slot_rx.recv() => {
+                    // Without slots the loop would wait forever on the other channels.
+                    let Some(update) = update else {
+                        is_slot_stream_ended = true;
+                        break;
+                    };
                     seen_slots.insert(update.slot);
                     self.endpoint_data.updates.push(update);
 
@@ -700,6 +706,20 @@ impl SlotCollector {
         }
 
         slot_handle.abort();
+        if is_slot_stream_ended {
+            for handle in account_handles {
+                handle.abort();
+            }
+            if let Some(handle) = tx_handle {
+                handle.abort();
+            }
+            return Err(GrpcError::StreamError(format!(
+                "{} slot stream ended after {} of {} slots",
+                self.endpoint_data.endpoint,
+                seen_slots.len(),
+                target_slot_count
+            )));
+        }
         for handle in account_handles {
             handle.abort();
         }
