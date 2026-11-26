@@ -426,6 +426,30 @@ impl GrpcClient {
         Ok(latencies)
     }
 
+    /// The `grpc-encoding` a subscription's response announces; "none" when the server does not compress.
+    pub async fn response_encoding(&self) -> Result<String> {
+        let mut client = self.connect().await?;
+        let request = SubscribeRequest {
+            slots: [("".to_string(), SubscribeRequestFilterSlots::default())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let response = client
+            .geyser
+            .subscribe(futures::stream::iter([request]))
+            .await
+            .map_err(|e| GrpcError::SubscriptionFailed(e.to_string()))?;
+        let encoding = response
+            .metadata()
+            .get("grpc-encoding")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("none")
+            .to_string();
+
+        Ok(encoding)
+    }
+
     /// Retries a failed connect, as some providers refuse a burst of new connections.
     async fn connect(&self) -> Result<GeyserGrpcClient<impl Interceptor>> {
         const ATTEMPTS: u32 = 5;
@@ -556,6 +580,13 @@ impl SlotCollector {
         };
 
         info!("{}: version {}", endpoint, version);
+
+        if !richat {
+            match client.response_encoding().await {
+                Ok(encoding) => info!("{}: response compression {}", endpoint, encoding),
+                Err(error) => warn!("{}: response compression unknown ({})", endpoint, error),
+            }
+        }
 
         // Ping is also metadata, so keep going if the probe isn't available.
         let avg_ping = if latency_samples > 0 {
