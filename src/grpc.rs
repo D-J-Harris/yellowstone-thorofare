@@ -425,7 +425,27 @@ impl GrpcClient {
         Ok(latencies)
     }
 
+    /// Retries a failed connect, as some providers refuse a burst of new connections.
     async fn connect(&self) -> Result<GeyserGrpcClient<impl Interceptor>> {
+        const ATTEMPTS: u32 = 5;
+        let mut attempt = 1;
+        loop {
+            match self.connect_once().await {
+                Ok(client) => return Ok(client),
+                Err(e) if attempt < ATTEMPTS => {
+                    warn!(
+                        "{}: connect attempt {}/{} failed ({}), retrying",
+                        self.config.endpoint, attempt, ATTEMPTS, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn connect_once(&self) -> Result<GeyserGrpcClient<impl Interceptor>> {
         let mut builder = GeyserGrpcClient::build_from_shared(self.config.endpoint.clone())
             .map_err(|e| GrpcError::ConnectionFailed(e.to_string()))?;
 
