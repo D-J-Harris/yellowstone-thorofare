@@ -4,8 +4,8 @@ use {
     std::{collections::HashSet, fs, str::FromStr, time::Instant},
     tracing::{error, info},
     yellowstone_thorofare::{
-        BenchmarkResult, Collector, Config, EndpointSpec, EndpointSummary, Percentiles, Processor,
-        Subscriptions,
+        AccountFilter, BenchmarkResult, Collector, Config, EndpointSpec, EndpointSummary,
+        Percentiles, Processor, Subscriptions,
     },
 };
 
@@ -43,9 +43,10 @@ struct Args {
     #[clap(long)]
     with_accounts: bool,
 
-    /// Filter accounts by owner pubkey
-    #[clap(long, conflicts_with = "accounts_files")]
-    account_owner: Option<String>,
+    /// Program IDs, comma-separated, whose accounts form one account subscription on every
+    /// endpoint (repeatable: each value is its own subscription)
+    #[clap(long = "account-owner")]
+    account_owners: Vec<String>,
 
     /// File of account addresses, one per line ('#' starts a comment); each file is its own
     /// account subscription on every endpoint (repeatable)
@@ -110,33 +111,41 @@ async fn main() {
 
     let endpoints = parse_endpoints(&args.endpoints, &args.richat);
 
-    let has_account_filter = args.account_owner.is_some() || !args.accounts_files.is_empty();
+    let has_account_filter = !args.account_owners.is_empty() || !args.accounts_files.is_empty();
     if args.with_accounts != has_account_filter {
         panic!("--with-accounts needs --account-owner or --accounts-file, and they need it");
     }
-    if let Some(ref owner) = args.account_owner {
-        if Pubkey::from_str(owner).is_err() {
-            panic!("Invalid account owner pubkey: {}", owner);
+    let mut account_filters = Vec::new();
+    for group in &args.account_owners {
+        let owners: Vec<String> = group
+            .split(',')
+            .map(|owner| owner.trim().to_string())
+            .collect();
+        for owner in &owners {
+            if Pubkey::from_str(owner).is_err() {
+                panic!("Invalid account owner pubkey: {}", owner);
+            }
         }
-        info!("Account Owner Filter: {}", owner);
+        info!("Account subscription by owner: {}", group);
+        account_filters.push(AccountFilter::Owners(owners));
     }
-    let account_lists: Vec<Vec<String>> = args
-        .accounts_files
-        .iter()
-        .map(|path| read_accounts_file(path))
-        .collect();
-    let is_richat_with_account_list =
-        !account_lists.is_empty() && endpoints.iter().any(|endpoint| endpoint.richat);
-    if is_richat_with_account_list {
-        panic!("--accounts-file is not supported for Richat endpoints, which stream every account");
-    }
-    for (path, accounts) in args.accounts_files.iter().zip(&account_lists) {
+    for path in &args.accounts_files {
+        let accounts = read_accounts_file(path);
         info!(
             "Account subscription from {}: {} accounts",
             path,
             accounts.len()
         );
+        account_filters.push(AccountFilter::Addresses(accounts));
     }
+    let is_richat_with_account_filter =
+        !account_filters.is_empty() && endpoints.iter().any(|endpoint| endpoint.richat);
+    if is_richat_with_account_filter {
+        panic!(
+            "Account filters are not supported for Richat endpoints, which stream every account"
+        );
+    }
+    let account_owner = (!args.account_owners.is_empty()).then(|| args.account_owners.join(";"));
 
     if !args.transaction_accounts.is_empty() && !args.with_transactions {
         panic!("--transaction-account requires --with-transactions");
@@ -177,8 +186,7 @@ async fn main() {
 
     let subscriptions = Subscriptions {
         with_accounts: args.with_accounts,
-        account_owner: args.account_owner.clone(),
-        account_lists,
+        account_filters,
         with_transactions: args.with_transactions,
         transaction_accounts: args.transaction_accounts.clone(),
         commitment: args.commitment as i32,
@@ -206,7 +214,7 @@ async fn main() {
             let result = Processor::process(
                 VERSION.to_string(),
                 args.with_accounts,
-                args.account_owner.clone(),
+                account_owner.clone(),
                 args.with_transactions,
                 args.transaction_accounts.clone(),
                 args.core_slot_statuses,

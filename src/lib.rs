@@ -8,7 +8,7 @@ mod types;
 pub use {
     collector::{CollectedEndpoint, Collector, EndpointSpec},
     config::Config,
-    grpc::{GrpcClient, GrpcConfig, Subscriptions},
+    grpc::{AccountFilter, GrpcClient, GrpcConfig, Subscriptions},
     processor::{
         BenchmarkResult, EndpointMetadata, EndpointSummary, GrpcConfigSummary, Percentiles,
         Processor,

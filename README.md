@@ -31,7 +31,7 @@ Optional:
 - `--richat NAME` - Use the Richat interface for the endpoint with this NAME (repeatable)
 - `--slots` - Number of slots to collect (default: 1000)
 - `--with-accounts` - Track account updates; needs `--account-owner` or `--accounts-file`
-- `--account-owner` - Filter accounts by program ID
+- `--account-owner ID[,ID...]` - Every account these programs own, as one account subscription on every endpoint. Repeatable: each value is its own subscription.
 - `--accounts-file PATH` - File of account addresses, one per line (`#` starts a comment). Each file is a separate account subscription on every endpoint, holding exactly those addresses. Repeatable. Not supported for Richat endpoints.
 - `--commitment processed|confirmed|finalized` - Commitment of the account and transaction subscriptions (default: processed)
 - `--with-transactions` - Track transaction updates (non-vote)

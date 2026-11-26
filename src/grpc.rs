@@ -64,13 +64,20 @@ pub struct GrpcConfig {
     pub buffer_size: Option<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub enum AccountFilter {
+    /// Every account any of these programs owns.
+    Owners(Vec<String>),
+    /// Exactly these accounts.
+    Addresses(Vec<String>),
+}
+
 /// What every endpoint is subscribed to; the same for all endpoints in a run.
 #[derive(Clone, Debug, Default)]
 pub struct Subscriptions {
     pub with_accounts: bool,
-    pub account_owner: Option<String>,
-    /// Each list is one account subscription holding exactly those addresses.
-    pub account_lists: Vec<Vec<String>>,
+    /// Each filter is one account subscription.
+    pub account_filters: Vec<AccountFilter>,
     pub with_transactions: bool,
     pub transaction_accounts: Vec<String>,
     /// Yellowstone `CommitmentLevel` of the account and transaction subscriptions.
@@ -136,32 +143,26 @@ impl GrpcClient {
         Ok(())
     }
 
-    /// Subscribes to `accounts` by address, or to every account of the owner when `accounts` is empty.
     pub async fn subscribe_accounts(
         &self,
         tx: mpsc::UnboundedSender<AccountUpdate>,
-        accounts: Vec<String>,
+        filter: AccountFilter,
     ) -> Result<()> {
         let mut client = self.connect().await?;
 
-        let is_owner_filter = accounts.is_empty();
+        let filter = match filter {
+            AccountFilter::Owners(owner) => SubscribeRequestFilterAccounts {
+                owner,
+                nonempty_txn_signature: Some(true),
+                ..Default::default()
+            },
+            AccountFilter::Addresses(account) => SubscribeRequestFilterAccounts {
+                account,
+                ..Default::default()
+            },
+        };
         let request = SubscribeRequest {
-            accounts: [(
-                "".to_string(),
-                SubscribeRequestFilterAccounts {
-                    owner: self
-                        .subscriptions
-                        .account_owner
-                        .clone()
-                        .into_iter()
-                        .collect(),
-                    account: accounts,
-                    nonempty_txn_signature: is_owner_filter.then_some(true),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
+            accounts: [("".to_string(), filter)].into_iter().collect(),
             commitment: Some(self.subscriptions.commitment),
             ..Default::default()
         };
@@ -628,15 +629,13 @@ impl SlotCollector {
             })
         };
 
-        // An empty list subscribes by owner.
-        let account_lists = match (with_accounts, &self.client.subscriptions.account_lists) {
-            (false, _) => Vec::new(),
-            (true, lists) if lists.is_empty() => vec![Vec::new()],
-            (true, lists) => lists.clone(),
+        let account_filters = match with_accounts {
+            true => self.client.subscriptions.account_filters.clone(),
+            false => Vec::new(),
         };
-        let account_handles: Vec<_> = account_lists
+        let account_handles: Vec<_> = account_filters
             .into_iter()
-            .map(|accounts| {
+            .map(|filter| {
                 let client = self.client.clone();
                 let endpoint = endpoint.clone();
                 let account_tx = account_tx.clone();
@@ -645,7 +644,7 @@ impl SlotCollector {
                         if let Err(e) = client.subscribe_accounts_richat(account_tx).await {
                             error!("{} account subscription failed: {}", endpoint, e);
                         }
-                    } else if let Err(e) = client.subscribe_accounts(account_tx, accounts).await {
+                    } else if let Err(e) = client.subscribe_accounts(account_tx, filter).await {
                         error!("{} account subscription failed: {}", endpoint, e);
                     }
                 })
