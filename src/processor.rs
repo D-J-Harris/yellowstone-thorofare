@@ -24,7 +24,7 @@ pub struct BenchmarkResult {
     pub slots: Vec<SlotComparison>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct GrpcConfigSummary {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -142,6 +142,7 @@ type AccountMatchMap = HashMap<AccountKey, (Option<Instant>, Option<Instant>)>;
 type TransactionKey = Signature;
 type TransactionMatchMap = HashMap<TransactionKey, (Option<Instant>, Option<Instant>)>;
 
+#[derive(Clone)]
 pub struct EndpointMetadata {
     pub plugin_type: String,
     pub plugin_version: String,

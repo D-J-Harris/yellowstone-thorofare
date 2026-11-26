@@ -1,130 +1,73 @@
 use {
     crate::{
         Config, GrpcConfig,
-        grpc::{GrpcError, SlotCollector},
+        grpc::{GrpcError, SlotCollector, Subscriptions},
         processor::{EndpointMetadata, GrpcConfigSummary},
         types::EndpointData,
     },
+    futures::future::join_all,
     std::{sync::Arc, time::Duration},
     tokio::sync::Barrier,
     tracing::info,
 };
 
-pub type RunCollectorResult = Result<
-    (
-        EndpointData,     // data for endpoint1
-        EndpointData,     // data for endpoint2
-        EndpointMetadata, // metadata for endpoint1
-        EndpointMetadata, // metadata for endpoint2
-        Duration,         // avg ping for endpoint1
-        Duration,         // avg ping for endpoint2
-    ),
-    GrpcError,
->;
+pub struct EndpointSpec {
+    pub name: String,
+    pub url: String,
+    pub x_token: Option<String>,
+    pub richat: bool,
+}
+
+pub struct CollectedEndpoint {
+    pub name: String,
+    pub data: EndpointData,
+    pub meta: EndpointMetadata,
+    pub avg_ping: Duration,
+}
 
 pub struct Collector {
     config: Config,
-    endpoint1: String,
-    endpoint2: String,
-    x_token1: Option<String>,
-    x_token2: Option<String>,
+    endpoints: Vec<EndpointSpec>,
     slot_count: usize,
-    with_accounts: bool,
-    account_owner: Option<String>,
-    with_transactions: bool,
-    transaction_accounts: Vec<String>,
-    endpoint1_richat: bool,
-    endpoint2_richat: bool,
+    subscriptions: Subscriptions,
 }
 
 impl Collector {
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         config: Config,
-        endpoint1: String,
-        endpoint2: String,
-        x_token1: Option<String>,
-        x_token2: Option<String>,
-        endpoint1_richat: bool,
-        endpoint2_richat: bool,
+        endpoints: Vec<EndpointSpec>,
         slot_count: usize,
-        with_accounts: bool,
-        account_owner: Option<String>,
-        with_transactions: bool,
-        transaction_accounts: Vec<String>,
+        subscriptions: Subscriptions,
     ) -> Self {
         Self {
             config,
-            endpoint1,
-            endpoint2,
-            x_token1,
-            x_token2,
+            endpoints,
             slot_count,
-            with_accounts,
-            account_owner,
-            with_transactions,
-            transaction_accounts,
-            endpoint1_richat,
-            endpoint2_richat,
+            subscriptions,
         }
     }
 
-    pub async fn run(self) -> RunCollectorResult {
-        let barrier = Arc::new(Barrier::new(2));
-
+    pub async fn run(self) -> Result<Vec<CollectedEndpoint>, GrpcError> {
         info!("Collecting endpoint versions and ping averages...");
 
-        // Create collectors and get version info
-        let collector1 = SlotCollector::new(
-            self.make_grpc_config(self.endpoint1.clone(), self.x_token1.clone()),
-            self.slot_count,
-            self.config.benchmark.buffer_percentage,
-            self.config.benchmark.latency_samples,
-            self.with_accounts,
-            self.account_owner.clone(),
-            self.with_transactions,
-            self.transaction_accounts.clone(),
-            self.endpoint1_richat,
-        )
-        .await?;
+        let mut collectors = Vec::with_capacity(self.endpoints.len());
+        for endpoint in &self.endpoints {
+            let collector = SlotCollector::new(
+                self.make_grpc_config(endpoint.url.clone(), endpoint.x_token.clone()),
+                self.slot_count,
+                self.config.benchmark.buffer_percentage,
+                self.config.benchmark.latency_samples,
+                self.subscriptions.clone(),
+                endpoint.richat,
+            )
+            .await?;
+            collectors.push(collector);
+        }
 
-        let collector2 = SlotCollector::new(
-            self.make_grpc_config(self.endpoint2.clone(), self.x_token2.clone()),
-            self.slot_count,
-            self.config.benchmark.buffer_percentage,
-            self.config.benchmark.latency_samples,
-            self.with_accounts,
-            self.account_owner.clone(),
-            self.with_transactions,
-            self.transaction_accounts.clone(),
-            self.endpoint2_richat,
-        )
-        .await?;
-
-        // Capture metadata
-        let meta1 = EndpointMetadata {
-            plugin_type: if self.endpoint1_richat {
-                "Richat".to_string()
-            } else {
-                "Yellowstone".to_string()
-            },
-            plugin_version: collector1.version.clone(),
-        };
-
-        let meta2 = EndpointMetadata {
-            plugin_type: if self.endpoint2_richat {
-                "Richat".to_string()
-            } else {
-                "Yellowstone".to_string()
-            },
-            plugin_version: collector2.version.clone(),
-        };
-
-        let ping1 = collector1.avg_ping;
-        let ping2 = collector2.avg_ping;
-
-        // Start synchronized collection
-        let extras = match (self.with_accounts, self.with_transactions) {
+        let extras = match (
+            self.subscriptions.with_accounts,
+            self.subscriptions.with_transactions,
+        ) {
             (true, true) => " with account and transaction updates",
             (true, false) => " with account updates",
             (false, true) => " with transaction updates",
@@ -132,42 +75,50 @@ impl Collector {
         };
         info!("Starting synchronized collection{}", extras);
 
-        let (data1, data2) = tokio::join!(
-            Self::collect_with_barrier(collector1, Arc::clone(&barrier)),
-            Self::collect_with_barrier(collector2, barrier)
-        );
-
-        let data1 = data1?;
-        let data2 = data2?;
-
-        // Log account collection results
-        if self.with_accounts {
-            info!(
-                "Collected {} account updates from {}",
-                data1.account_updates.len(),
-                data1.endpoint
-            );
-            info!(
-                "Collected {} account updates from {}",
-                data2.account_updates.len(),
-                data2.endpoint
-            );
+        let barrier = Arc::new(Barrier::new(collectors.len()));
+        let mut metadata = Vec::with_capacity(collectors.len());
+        let mut runs = Vec::with_capacity(collectors.len());
+        for (endpoint, collector) in self.endpoints.iter().zip(collectors) {
+            let plugin_type = match endpoint.richat {
+                true => "Richat",
+                false => "Yellowstone",
+            };
+            let meta = EndpointMetadata {
+                plugin_type: plugin_type.to_string(),
+                plugin_version: collector.version.clone(),
+            };
+            metadata.push((endpoint.name.clone(), meta, collector.avg_ping));
+            runs.push(Self::collect_with_barrier(collector, Arc::clone(&barrier)));
         }
 
-        if self.with_transactions {
-            info!(
-                "Collected {} transaction updates from {}",
-                data1.transaction_updates.len(),
-                data1.endpoint
-            );
-            info!(
-                "Collected {} transaction updates from {}",
-                data2.transaction_updates.len(),
-                data2.endpoint
-            );
+        let collected = join_all(runs).await;
+
+        let mut endpoints = Vec::with_capacity(collected.len());
+        for ((name, meta, avg_ping), data) in metadata.into_iter().zip(collected) {
+            let data = data?;
+            if self.subscriptions.with_accounts {
+                info!(
+                    "Collected {} account updates from {}",
+                    data.account_updates.len(),
+                    name
+                );
+            }
+            if self.subscriptions.with_transactions {
+                info!(
+                    "Collected {} transaction updates from {}",
+                    data.transaction_updates.len(),
+                    name
+                );
+            }
+            endpoints.push(CollectedEndpoint {
+                name,
+                data,
+                meta,
+                avg_ping,
+            });
         }
 
-        Ok((data1, data2, meta1, meta2, ping1, ping2))
+        Ok(endpoints)
     }
 
     async fn collect_with_barrier(

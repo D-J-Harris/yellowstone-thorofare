@@ -6,9 +6,12 @@ pub mod richat;
 mod types;
 
 pub use {
-    collector::Collector,
+    collector::{CollectedEndpoint, Collector, EndpointSpec},
     config::Config,
-    grpc::{GrpcClient, GrpcConfig},
-    processor::{EndpointMetadata, GrpcConfigSummary, Processor},
+    grpc::{GrpcClient, GrpcConfig, Subscriptions},
+    processor::{
+        BenchmarkResult, EndpointMetadata, EndpointSummary, GrpcConfigSummary, Percentiles,
+        Processor,
+    },
     types::{EndpointData, SlotStatus},
 };

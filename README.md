@@ -17,78 +17,51 @@ cargo build --release
 
 ## Basic usage
 ```bash
-thorofare --endpoint1 https://endpoint1.com:10000 --endpoint2 https://endpoint2.com:10000
+export X_TOKEN_TRITON=...   # token for the endpoint named "triton"
+export X_TOKEN_HELIUS=...
+thorofare --endpoint triton=https://triton.example:443 --endpoint helius=https://helius.example:443
 ```
 
 ## Arguments
 
 Required:
-- `--endpoint1` - First endpoint, full URL including scheme (e.g. `https://endpoint1.com:10000`); a bare `host:port` fails with a gRPC transport error
-- `--endpoint2` - Second endpoint, same format as `--endpoint1`
+- `--endpoint NAME=URL` - Endpoint to benchmark; repeat it for each endpoint (at least 2). URL is the full URL including scheme. The x-token is read from the environment variable `X_TOKEN_<NAME>` (NAME upper-cased, `-` turned to `_`), so it never appears in the command line, shell history or `ps`.
 
 Optional:
-- `--x-token1` - Auth token for endpoint1
-- `--x-token2` - Auth token for endpoint2
+- `--richat NAME` - Use the Richat interface for the endpoint with this NAME (repeatable)
 - `--slots` - Number of slots to collect (default: 1000)
-- `--with-accounts` - Track account updates
-- `--account-owner` - Filter by program ID (requires --with-accounts)
+- `--with-accounts` - Track account updates; needs `--account-owner` or `--accounts-file`
+- `--account-owner` - Filter accounts by program ID
+- `--accounts-file PATH` - File of account addresses, one per line (`#` starts a comment). Each file is a separate account subscription on every endpoint, holding exactly those addresses. Repeatable. Not supported for Richat endpoints.
+- `--commitment processed|confirmed|finalized` - Commitment of the account and transaction subscriptions (default: processed)
 - `--with-transactions` - Track transaction updates (non-vote)
 - `--transaction-account` - Only race transactions that touch this account; repeat for more (requires --with-transactions). Without it every non-vote transaction is streamed.
-- `--core-slot-statuses` - Compare slots on CreatedBank, Processed, Confirmed and Finalized only. Use it for servers that never send FirstShredReceived or Completed, such as Firedancer Dragon's Mouth. Without it such slots are all dropped. First-shred delay and download time are then compared only where both endpoints sent both statuses, and `download_ms` is 0 for a slot without them.
-- `--endpoint1-richat` - Use Richat interface for endpoint1
-- `--endpoint2-richat` - Use Richat interface for endpoint2
+- `--core-slot-statuses` - Compare slots on CreatedBank, Processed, Confirmed and Finalized only. Use it for servers that never send FirstShredReceived or Completed, such as Firedancer Dragon's Mouth. Without it such slots are all dropped.
 - `--config` - Config file (default: config.toml)
-- `--output` - Output file (default: benchmark_results.json)
+- `--output` - Output file (default: benchmark_results.json). Every pair of endpoints is compared on the same collected updates and written to `<stem>.<name1>-vs-<name2>.json`.
 - `--log-level` - Log level (default: info)
 
 ## Examples
 
-With auth tokens:
+Three endpoints, accounts given by address in two subscriptions, at confirmed commitment:
 ```bash
 thorofare \
-  --endpoint1 https://endpoint1.com:10000 \
-  --endpoint2 https://endpoint2.com:10000 \
-  --x-token1 YOUR_TOKEN_1 \
-  --x-token2 YOUR_TOKEN_2
+  --endpoint triton=https://triton.example:443 \
+  --endpoint helius=https://helius.example:443 \
+  --endpoint quicknode=https://quicknode.example:10000 \
+  --with-accounts \
+  --accounts-file whirlpools.txt \
+  --accounts-file other_pools.txt \
+  --commitment confirmed
 ```
 
 Track account updates by program owner:
 ```bash
 thorofare \
-  --endpoint1 https://endpoint1.com:10000 \
-  --endpoint2 https://endpoint2.com:10000 \
+  --endpoint a=https://endpoint1.com:10000 \
+  --endpoint b=https://endpoint2.com:10000 \
   --with-accounts \
   --account-owner 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
-```
-
-Firedancer Dragon's Mouth against Agave Yellowstone, plaintext (set `use_tls = false` in the config):
-```bash
-thorofare \
-  --endpoint1 http://firedancer-host:10000 \
-  --endpoint2 http://agave-host:10000 \
-  --core-slot-statuses \
-  --with-accounts \
-  --account-owner 11111111111111111111111111111111 \
-  --with-transactions \
-  --transaction-account 11111111111111111111111111111111
-```
-
-Track transaction propagation:
-```bash
-thorofare \
-  --endpoint1 https://endpoint1.com:10000 \
-  --endpoint2 https://endpoint2.com:10000 \
-  --with-transactions
-```
-
-Full benchmark (slots + accounts + transactions):
-```bash
-thorofare \
-  --endpoint1 https://endpoint1.com:10000 \
-  --endpoint2 https://endpoint2.com:10000 \
-  --with-accounts \
-  --account-owner 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 \
-  --with-transactions
 ```
 
 ## Output

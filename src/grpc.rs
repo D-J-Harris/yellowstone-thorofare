@@ -23,7 +23,7 @@ use {
             SubscribeRequestFilterTransactions,
             subscribe_update::UpdateOneof as YellowstoneUpdateOneof,
         },
-        tonic::transport::ClientTlsConfig,
+        tonic::{codec::CompressionEncoding, transport::ClientTlsConfig},
     },
 };
 
@@ -64,33 +64,34 @@ pub struct GrpcConfig {
     pub buffer_size: Option<usize>,
 }
 
+/// What every endpoint is subscribed to; the same for all endpoints in a run.
+#[derive(Clone, Debug, Default)]
+pub struct Subscriptions {
+    pub with_accounts: bool,
+    pub account_owner: Option<String>,
+    /// Each list is one account subscription holding exactly those addresses.
+    pub account_lists: Vec<Vec<String>>,
+    pub with_transactions: bool,
+    pub transaction_accounts: Vec<String>,
+    /// Yellowstone `CommitmentLevel` of the account and transaction subscriptions.
+    pub commitment: i32,
+}
+
 #[derive(Clone)]
 pub struct GrpcClient {
     config: GrpcConfig,
-    with_accounts: bool,
-    account_owner: Option<String>,
-    with_transactions: bool,
-    transaction_accounts: Vec<String>,
+    subscriptions: Subscriptions,
 }
 
 impl GrpcClient {
-    pub fn new(
-        config: GrpcConfig,
-        with_accounts: bool,
-        account_owner: Option<String>,
-        with_transactions: bool,
-        transaction_accounts: Vec<String>,
-    ) -> Result<Self> {
+    pub fn new(config: GrpcConfig, subscriptions: Subscriptions) -> Result<Self> {
         if config.endpoint.is_empty() {
             return Err(GrpcError::InvalidConfig("Empty endpoint".into()));
         }
 
         Ok(Self {
             config,
-            with_accounts,
-            account_owner,
-            with_transactions,
-            transaction_accounts,
+            subscriptions,
         })
     }
 
@@ -135,21 +136,33 @@ impl GrpcClient {
         Ok(())
     }
 
-    pub async fn subscribe_accounts(&self, tx: mpsc::UnboundedSender<AccountUpdate>) -> Result<()> {
+    /// Subscribes to `accounts` by address, or to every account of the owner when `accounts` is empty.
+    pub async fn subscribe_accounts(
+        &self,
+        tx: mpsc::UnboundedSender<AccountUpdate>,
+        accounts: Vec<String>,
+    ) -> Result<()> {
         let mut client = self.connect().await?;
 
+        let is_owner_filter = accounts.is_empty();
         let request = SubscribeRequest {
             accounts: [(
                 "".to_string(),
                 SubscribeRequestFilterAccounts {
-                    owner: self.account_owner.clone().into_iter().collect(),
-                    nonempty_txn_signature: Some(true),
+                    owner: self
+                        .subscriptions
+                        .account_owner
+                        .clone()
+                        .into_iter()
+                        .collect(),
+                    account: accounts,
+                    nonempty_txn_signature: is_owner_filter.then_some(true),
                     ..Default::default()
                 },
             )]
             .into_iter()
             .collect(),
-            commitment: Some(0), // Processed
+            commitment: Some(self.subscriptions.commitment),
             ..Default::default()
         };
 
@@ -206,14 +219,14 @@ impl GrpcClient {
                     vote: Some(false),
                     failed: None,
                     signature: None,
-                    account_include: self.transaction_accounts.clone(),
+                    account_include: self.subscriptions.transaction_accounts.clone(),
                     account_exclude: vec![],
                     account_required: vec![],
                 },
             )]
             .into_iter()
             .collect(),
-            commitment: Some(0), // Processed
+            commitment: Some(self.subscriptions.commitment),
             ..Default::default()
         };
 
@@ -427,7 +440,8 @@ impl GrpcClient {
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout)
             .http2_adaptive_window(self.config.http2_adaptive_window)
-            .tcp_nodelay(self.config.tcp_nodelay);
+            .tcp_nodelay(self.config.tcp_nodelay)
+            .accept_compressed(CompressionEncoding::Zstd);
 
         if let Some(interval) = self.config.http2_keep_alive_interval {
             builder = builder.http2_keep_alive_interval(interval);
@@ -449,7 +463,9 @@ impl GrpcClient {
             builder = builder.buffer_size(size);
         }
 
-        if self.config.use_tls {
+        // A run may mix TLS and plaintext endpoints, so an http:// URL never gets TLS.
+        let is_https = self.config.endpoint.starts_with("https://");
+        if self.config.use_tls && is_https {
             builder = builder
                 .tls_config(ClientTlsConfig::new().with_native_roots())
                 .map_err(|e| GrpcError::ConnectionFailed(format!("TLS config: {}", e)))?;
@@ -481,20 +497,11 @@ impl SlotCollector {
         target_slots: usize,
         buffer_percent: f32,
         latency_samples: usize,
-        with_accounts: bool,
-        account_owner: Option<String>,
-        with_transactions: bool,
-        transaction_accounts: Vec<String>,
+        subscriptions: Subscriptions,
         richat: bool,
     ) -> Result<Self> {
         let endpoint = config.endpoint.clone();
-        let client = GrpcClient::new(
-            config,
-            with_accounts,
-            account_owner,
-            with_transactions,
-            transaction_accounts,
-        )?;
+        let client = GrpcClient::new(config, subscriptions)?;
 
         // Version is metadata only, so don't fail the whole benchmark if it isn't exposed.
         let version = if richat {
@@ -583,8 +590,8 @@ impl SlotCollector {
 
         let endpoint = self.endpoint_data.endpoint.clone();
         let richat = self.richat;
-        let with_accounts = self.client.with_accounts;
-        let with_transactions = self.client.with_transactions;
+        let with_accounts = self.client.subscriptions.with_accounts;
+        let with_transactions = self.client.subscriptions.with_transactions;
 
         // Spawn slot collector
         let slot_handle = {
@@ -601,22 +608,30 @@ impl SlotCollector {
             })
         };
 
-        // Spawn account collector if needed
-        let account_handle = if with_accounts {
-            let client = self.client.clone();
-            let endpoint = endpoint.clone();
-            Some(tokio::spawn(async move {
-                if richat {
-                    if let Err(e) = client.subscribe_accounts_richat(account_tx).await {
+        // An empty list subscribes by owner.
+        let account_lists = match (with_accounts, &self.client.subscriptions.account_lists) {
+            (false, _) => Vec::new(),
+            (true, lists) if lists.is_empty() => vec![Vec::new()],
+            (true, lists) => lists.clone(),
+        };
+        let account_handles: Vec<_> = account_lists
+            .into_iter()
+            .map(|accounts| {
+                let client = self.client.clone();
+                let endpoint = endpoint.clone();
+                let account_tx = account_tx.clone();
+                tokio::spawn(async move {
+                    if richat {
+                        if let Err(e) = client.subscribe_accounts_richat(account_tx).await {
+                            error!("{} account subscription failed: {}", endpoint, e);
+                        }
+                    } else if let Err(e) = client.subscribe_accounts(account_tx, accounts).await {
                         error!("{} account subscription failed: {}", endpoint, e);
                     }
-                } else if let Err(e) = client.subscribe_accounts(account_tx).await {
-                    error!("{} account subscription failed: {}", endpoint, e);
-                }
-            }))
-        } else {
-            None
-        };
+                })
+            })
+            .collect();
+        drop(account_tx);
 
         // Spawn transaction collector if needed
         let tx_handle = if with_transactions {
@@ -685,7 +700,7 @@ impl SlotCollector {
         }
 
         slot_handle.abort();
-        if let Some(handle) = account_handle {
+        for handle in account_handles {
             handle.abort();
         }
         if let Some(handle) = tx_handle {

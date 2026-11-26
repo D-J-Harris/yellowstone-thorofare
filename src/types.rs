@@ -58,6 +58,7 @@ impl From<i32> for SlotStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct EndpointData {
     pub updates: Vec<SlotUpdate>,
     pub account_updates: Vec<AccountUpdate>,
